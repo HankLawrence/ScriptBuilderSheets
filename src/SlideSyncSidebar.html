@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: 'Google Sans', Roboto, Arial, sans-serif;
+        margin: 0;
+        padding: 16px;
+        color: #202124;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: 20px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 16px;
+      }
+      th, td {
+        padding: 8px;
+        border-bottom: 1px solid #e0e0e0;
+        vertical-align: top;
+      }
+      th {
+        text-align: left;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #5f6368;
+      }
+      tr:hover {
+        background: #f8f9fa;
+      }
+      input[type="text"] {
+        width: 140px;
+        padding: 4px 6px;
+        box-sizing: border-box;
+      }
+      .schedule-toggle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      button {
+        cursor: pointer;
+        background: #1a73e8;
+        border: none;
+        color: white;
+        padding: 6px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      button.secondary {
+        background: #5f6368;
+      }
+      button[disabled] {
+        background: #dadce0;
+        cursor: default;
+      }
+      .status {
+        margin-bottom: 12px;
+        font-size: 12px;
+        color: #5f6368;
+      }
+      .preview {
+        border: 1px solid #dadce0;
+        border-radius: 6px;
+        padding: 12px;
+        background: #f8f9fa;
+      }
+      .preview h3 {
+        margin-top: 0;
+        font-size: 16px;
+      }
+      .chips {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 6px 0 0;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        background: #e8f0fe;
+        border-radius: 12px;
+        font-size: 11px;
+        color: #1967d2;
+      }
+      .warning {
+        color: #c5221f;
+      }
+      .hidden {
+        display: none;
+      }
+      .cron-hint {
+        font-size: 11px;
+        color: #5f6368;
+      }
+      .diff-list {
+        margin: 0;
+        padding-left: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Slide Sync Manager</h2>
+    <p>Preview Google Sheets data, toggle automatic schedules, and push updates into Google Slides.</p>
+    <div id="status" class="status"></div>
+    <table id="jobsTable">
+      <thead>
+        <tr>
+          <th>Sheet ↔ Slide</th>
+          <th>Schedule</th>
+          <th>Cron Expression</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="jobsBody"></tbody>
+    </table>
+    <button id="saveButton" class="secondary">Save Schedule Settings</button>
+    <p class="cron-hint">Cron format: <code>minute hour day month weekday</code> — e.g. <code>0 9 * * 1</code> runs every Monday at 9:00.</p>
+    <div id="preview" class="preview hidden">
+      <h3>Preview</h3>
+      <div id="previewSummary"></div>
+      <div id="previewValidation" class="warning"></div>
+      <ul id="previewDiff" class="diff-list"></ul>
+    </div>
+    <script>
+      let jobs = [];
+      const statusEl = document.getElementById('status');
+      const jobsBody = document.getElementById('jobsBody');
+      const saveButton = document.getElementById('saveButton');
+      const previewEl = document.getElementById('preview');
+      const previewSummaryEl = document.getElementById('previewSummary');
+      const previewValidationEl = document.getElementById('previewValidation');
+      const previewDiffEl = document.getElementById('previewDiff');
+
+      function setStatus(message, isError) {
+        statusEl.textContent = message || '';
+        statusEl.classList.toggle('warning', !!isError);
+      }
+
+      function loadJobs() {
+        setStatus('Loading configured jobs…');
+        google.script.run
+          .withSuccessHandler((data) => {
+            jobs = data || [];
+            renderJobs();
+            setStatus(jobs.length ? `Loaded ${jobs.length} job(s).` : 'No jobs configured.');
+          })
+          .withFailureHandler((error) => {
+            setStatus(error.message || 'Failed to load jobs.', true);
+          })
+          .getSlideSyncJobs();
+      }
+
+      function escapeHtml(value) {
+        return (value == null ? '' : String(value))
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function renderJobs() {
+        jobsBody.innerHTML = '';
+        if (!jobs.length) {
+          const row = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 4;
+          cell.textContent = 'No configuration rows found in the Slide Sync Config sheet.';
+          row.appendChild(cell);
+          jobsBody.appendChild(row);
+          return;
+        }
+
+        jobs.forEach((job, index) => {
+          const row = document.createElement('tr');
+
+          const jobCell = document.createElement('td');
+          jobCell.innerHTML = `<strong>${escapeHtml(job.sheetName)}</strong><br><small>Slide: ${escapeHtml(job.slideId)} · Page ${job.pageId + 1}</small><div class="chips">${job.matchText ? `<span class="chip">${escapeHtml(job.matchText)}</span>` : ''}${job.templateKey ? `<span class="chip">${escapeHtml(job.templateKey)}</span>` : ''}</div>`;
+          row.appendChild(jobCell);
+
+          const scheduleCell = document.createElement('td');
+          scheduleCell.innerHTML = `<label class="schedule-toggle"><input type="checkbox" data-index="${index}" class="schedule-toggle-input" ${job.scheduleEnabled ? 'checked' : ''}> Enabled</label>`;
+          row.appendChild(scheduleCell);
+
+          const cronCell = document.createElement('td');
+          cronCell.innerHTML = `<input type="text" data-index="${index}" class="cron-input" placeholder="* * * * *" value="${escapeHtml(job.cronExpression || '')}">`;
+          row.appendChild(cronCell);
+
+          const actionsCell = document.createElement('td');
+          actionsCell.className = 'actions';
+          const previewButton = document.createElement('button');
+          previewButton.textContent = 'Preview';
+          previewButton.onclick = () => previewJob(job.identifier);
+          const runButton = document.createElement('button');
+          runButton.textContent = 'Sync Now';
+          runButton.onclick = () => runJob(job.identifier);
+          actionsCell.appendChild(previewButton);
+          actionsCell.appendChild(runButton);
+          row.appendChild(actionsCell);
+
+          jobsBody.appendChild(row);
+        });
+      }
+
+      function gatherChanges() {
+        return jobs.map((job, index) => {
+          const enabled = document.querySelector(`.schedule-toggle-input[data-index="${index}"]`);
+          const cron = document.querySelector(`.cron-input[data-index="${index}"]`);
+          return {
+            identifier: job.identifier,
+            configRowNumber: job.configRowNumber,
+            scheduleEnabled: enabled ? enabled.checked : job.scheduleEnabled,
+            cronExpression: cron ? cron.value.trim() : job.cronExpression
+          };
+        });
+      }
+
+      function saveSchedules() {
+        const changes = gatherChanges();
+        setStatus('Saving schedule settings…');
+        saveButton.disabled = true;
+        google.script.run
+          .withSuccessHandler((result) => {
+            setStatus(`Updated ${result.updated || 0} row(s).`);
+            saveButton.disabled = false;
+            loadJobs();
+          })
+          .withFailureHandler((error) => {
+            setStatus(error.message || 'Failed to save schedule settings.', true);
+            saveButton.disabled = false;
+          })
+          .saveSlideSyncJobs(changes);
+      }
+
+      function previewJob(identifier) {
+        setStatus('Generating preview…');
+        google.script.run
+          .withSuccessHandler((result) => {
+            setStatus('Preview ready.');
+            renderPreview(result);
+          })
+          .withFailureHandler((error) => {
+            setStatus(error.message || 'Preview failed.', true);
+          })
+          .previewSlideSyncJob(identifier);
+      }
+
+      function runJob(identifier) {
+        setStatus('Running sync…');
+        google.script.run
+          .withSuccessHandler((result) => {
+            if (result) {
+              setStatus(result, true);
+            } else {
+              setStatus('Sync complete.');
+            }
+          })
+          .withFailureHandler((error) => {
+            setStatus(error.message || 'Sync failed.', true);
+          })
+          .runSlideSyncJob(identifier);
+      }
+
+      function renderPreview(result) {
+        if (!result || result.error) {
+          previewEl.classList.remove('hidden');
+          previewSummaryEl.textContent = result && result.error ? result.error : 'Preview failed.';
+          previewValidationEl.textContent = '';
+          previewDiffEl.innerHTML = '';
+          return;
+        }
+
+        previewEl.classList.remove('hidden');
+        previewSummaryEl.innerHTML = `<strong>${escapeHtml(result.update.sheetName)}</strong> → ${escapeHtml(result.update.slideId)} (page ${result.update.pageId + 1})<br>${escapeHtml(result.summary)}`;
+
+        if (result.validation && result.validation.errors && result.validation.errors.length) {
+          previewValidationEl.textContent = `Validation issues: ${result.validation.errors.join(' · ')}`;
+        } else {
+          previewValidationEl.textContent = '';
+        }
+
+        previewDiffEl.innerHTML = '';
+        if (result.diff && result.diff.length) {
+          result.diff.slice(0, 10).forEach((item) => {
+            const li = document.createElement('li');
+            if (item.type === 'changed') {
+              li.textContent = `Row ${item.rowIndex + 1} changed (${item.changedColumns.length} column(s)).`;
+            } else if (item.type === 'added') {
+              li.textContent = `Row ${item.rowIndex + 1} will be added.`;
+            } else if (item.type === 'removed') {
+              li.textContent = `Row ${item.rowIndex + 1} will be removed.`;
+            }
+            previewDiffEl.appendChild(li);
+          });
+          if (result.diff.length > 10) {
+            const li = document.createElement('li');
+            li.textContent = `…and ${result.diff.length - 10} more change(s).`;
+            previewDiffEl.appendChild(li);
+          }
+        } else {
+          const li = document.createElement('li');
+          li.textContent = 'No differences detected.';
+          previewDiffEl.appendChild(li);
+        }
+      }
+
+      saveButton.addEventListener('click', saveSchedules);
+      document.addEventListener('DOMContentLoaded', loadJobs);
+    </script>
+  </body>
+</html>
